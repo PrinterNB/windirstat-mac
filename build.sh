@@ -42,10 +42,29 @@ echo "\$(date '+%H:%M:%S') exited rc=\$?" >>"\$LOG"
 EOF
 fi
 
+# An iconless bundle shows a generic blank page in Finder, so draw one with make_icon.py
+# (stdlib PNG writer -> icon.iconset in the system temp area -> iconutil) and point
+# CFBundleIconFile at it, the way the working neighbour bundle on this machine does:
+# its plist says icon-windowed.icns and the file sits in Contents/Resources.
+# This runs before Info.plist is written, and is deliberately not fatal: without
+# iconutil, or if the drawing fails, the app still builds, launches, and the plist
+# below leaves CFBundleIconFile out.
+ICONFILE="AppIcon.icns"
+ICONKEY=""
+if python3 make_icon.py "$APP/Contents/Resources/$ICONFILE"; then
+    ICONKEY="    <key>CFBundleIconFile</key><string>$ICONFILE</string>"
+    echo "icon:   $APP/Contents/Resources/$ICONFILE"
+else
+    echo "note:   no icon (make_icon.py failed) - Finder will show the generic app page"
+    rm -f "$APP/Contents/Resources/$ICONFILE"
+fi
+
 cat > "$APP/Contents/Info.md" <<EOF
 Windirstat.app - built by build.sh on $(date '+%Y-%m-%d')
 Launcher: Contents/MacOS/Windirstat ($LAUNCHER, mode 0755).
 It runs $PROJ/windirstat.py in $PROJ; any output goes to $PROJ/windirstat.log.
+Icon: Contents/Resources/$ICONFILE, named by CFBundleIconFile in Contents/Info.plist
+(drawn by make_icon.py; left out if that step fails, which does not stop launching).
 Move the whole project folder if you move the app, or rebuild it with sh build.sh.
 Built on $(date '+%Y-%m-%d') by build.sh.
 EOF
@@ -60,6 +79,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <dict>
     <key>CFBundleDisplayName</key><string>Windirstat</string>
     <key>CFBundleExecutable</key><string>Windirstat</string>
+${ICONKEY}
     <key>CFBundleIdentifier</key><string>com.local.windirstat</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Windirstat</string>

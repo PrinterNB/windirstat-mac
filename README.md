@@ -36,6 +36,16 @@ Nothing to configure to start. Optional:
 Keyboard: `↑/↓` scroll, `←` up, `→`/`Enter` drill in, `s` sort, `m` mark, `d` delete,
 `t` top, `/` search, `r` rescan, `q` quit.
 
+**The list is a WinDirStat-style dropdown tree.** Folders carry a gutter marker:
+`▸` means collapsed, `▾` expanded. Click the marker (or the name) to open that folder,
+and its children appear indented directly under it; click again to close it. So you can
+see the shape of the whole folder at once instead of only one level. Set
+`"show_files": false` in `config.json` to see folders only, which keeps huge trees short.
+
+**Right-click a row** for a small menu: Drill into, Drill up, Mark or unmark, Delete marked,
+Top N, Search, Properties (size, path, kind, % of parent, file count), Close.
+`Esc` or clicking the popup's background closes it.
+
 ## Files
 
 | File | What it does |
@@ -44,6 +54,7 @@ Keyboard: `↑/↓` scroll, `←` up, `→`/`Enter` drill in, `s` sort, `m` mark
 | `config.json` | Saved settings (excludes, which size drives sorting, top N, Trash path) |
 | `build.sh` | Assembles `build/Windirstat.app` so you can double-click it from Finder |
 | `launcher.c` | The launcher compiled into the bundle: Finder refuses to run a script placed there |
+| `make_icon.py` | Draws the app icon (flat nested squares, like a disk map) and packs it with `iconutil` |
 | `testdata/make_fixture.py` | Builds `testdata/tiny/`, an awkward tree with known numbers |
 | `testdata/tiny/` | That fixture: a bundle, a hardlinked pair, a self-referencing symlink, a fifo, a locked folder |
 

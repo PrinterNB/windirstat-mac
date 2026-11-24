@@ -33,8 +33,8 @@ from tkinter import filedialog, messagebox
 # aggregate pass below can walk it in reverse.
 (
     NAME, PARENT, CHILD, SIB, KIND, FSIZE, FALLOC, SUBLOG, SUBALLOC,
-    NFILES, EXPAND, MARK, DEV, DEPTH,
-) = range(14)
+    NFILES, EXPAND, MARK, DEV, DEPTH, OPEN,
+) = range(15)
 
 K_DIR, K_FILE, K_LINK, K_VOL = "d", "f", "l", "v"
 
@@ -94,7 +94,10 @@ def scan(root, excludes, max_entries=MAX_ENTRIES, progress=None):
     """Full recursive walk. Returns (nodes, stats). Touches no Tk object."""
     root = os.path.abspath(root)
     rst = os.stat(root)
-    nodes = [[root, -1, -1, -1, K_DIR, 0, 0, 0, 0, 0, True, 0, rst.st_dev, 0]]
+    # root starts open so the tree view has rows to show, everything else starts
+    # closed in the new OPEN slot
+    nodes = [[root, -1, -1, -1, K_DIR, 0, 0, 0, 0, 0, True, 0, rst.st_dev, 0,
+              True]]
     stats = {"root": root, "entries": 0, "files": 0, "dirs": 1, "links": 0,
              "volumes": 0, "special": 0, "inaccessible": 0, "excluded": 0,
              "bytes": 0, "stopped": False, "seconds": 0.0, "where": root,
@@ -145,12 +148,12 @@ def scan(root, excludes, max_entries=MAX_ENTRIES, progress=None):
                     if s.st_dev != cn[DEV]:
                         # mount point / another volume: report it, do not wander in
                         nodes.append([name, cur, -1, -1, K_VOL, 0, 0, 0, 0, 0,
-                                      False, 0, s.st_dev, cn[DEPTH] + 1])
+                                      False, 0, s.st_dev, cn[DEPTH] + 1, False])
                         stats["volumes"] += 1
                     else:
                         nodes.append([name, cur, -1, -1, K_DIR, 0, 0, 0, 0, 0,
                                       not name.lower().endswith(BUNDLE_SUFFIXES),
-                                      0, s.st_dev, cn[DEPTH] + 1])
+                                      0, s.st_dev, cn[DEPTH] + 1, False])
                         stats["dirs"] += 1
                         stack.append((child, e.path))
                 elif stat_mod.S_ISREG(mode):
@@ -162,13 +165,13 @@ def scan(root, excludes, max_entries=MAX_ENTRIES, progress=None):
                     alloc = s.st_blocks * 512
                     nodes.append([name, cur, -1, -1, K_FILE, s.st_size, alloc,
                                   s.st_size, alloc, 1, False, 0, s.st_dev,
-                                  cn[DEPTH] + 1])
+                                  cn[DEPTH] + 1, False])
                     stats["files"] += 1
                     stats["bytes"] += s.st_size
                 elif stat_mod.S_ISLNK(mode):
                     # never followed, so a link back to a parent cannot loop the walk
                     nodes.append([name, cur, -1, -1, K_LINK, 0, 0, 0, 0, 0,
-                                  False, 0, cn[DEV], cn[DEPTH] + 1])
+                                  False, 0, cn[DEV], cn[DEPTH] + 1, False])
                     stats["links"] += 1
                 else:
                     stats["special"] += 1  # fifo, socket, door node, ...
@@ -314,7 +317,10 @@ def print_tree(nodes, stats, cfg, depth, top):
 # -------------------------------------------------------------------------- UI
 
 W, H, TOP, ROW_H = 1040, 560, 40, 22
-X_NAME, X_SIZE, X_ONDISK, X_PCT, X_CNT = 10, 640, 790, 900, 1030
+# the gutter holds the ▸/▾ disclosure and names step right by IND per level, so
+# the columns keep their old positions
+X_GUT, X_NAME, IND = 10, 34, 14
+X_SIZE, X_ONDISK, X_PCT, X_CNT = 640, 790, 900, 1030
 FONT = ("Menlo", 12)
 FONT_SMALL = ("Menlo", 11)
 BG, FG = "#1b1f24", "#e9eef4"
@@ -326,6 +332,12 @@ SORTS = [("biggest first", "size"), ("smallest first", "-size"),
 BUTTONS = [("Up", "up"), ("Sort", "sort"), ("Mark", "mark"),
            ("Delete marked", "delete"), ("Top N", "top"), ("Search", "search"),
            ("Rescan", "rescan"), ("Save settings", "save")]
+# the right-click popup lists these, one per line
+MENU_ITEMS = [("Drill into", "drill"), ("Drill up", "up"),
+              ("Mark or unmark", "mark"), ("Delete marked", "delete"),
+              ("Top N", "top"), ("Search", "search"),
+              ("Properties", "props"), ("Close", "close")]
+MENU_W, MENU_H = 250, 22 * (len(MENU_ITEMS) + 2) + 8
 
 
 class App:
@@ -342,6 +354,7 @@ class App:
         self.err = None
         self.note = None
         self.result = None
+        self.menupop, self.mvar = None, None   # right-click popup state
         self.root_path = root_path
         self.trash = cfg.get("trash") or os.path.expanduser("~/.Trash")
 
@@ -366,6 +379,10 @@ class App:
         c.bind("<MouseWheel>", lambda e: self.wheel(1))
         c.bind("<Shift-MouseWheel>", lambda e: self.wheel(-1))
         c.bind("<Button-1>", self.click)
+        # ctrl-click arrives as Button-2 on macOS, so bind both right-hand buttons
+        c.bind("<Button-3>", self.menu)
+        c.bind("<Button-2>", self.menu)
+        c.bind("<Escape>", self.close_menu)
         for key, act in [("Up", "wheel-"), ("Down", "wheel+"), ("Left", "up"),
                          ("Right", "drill"), ("Return", "drill"), ("s", "sort"),
                          ("m", "mark"), ("d", "delete"), ("t", "top"),
@@ -399,21 +416,57 @@ class App:
     def click(self, e):
         i = (e.y - TOP) // ROW_H + self.off
         self.sel = i if 0 <= i < len(self.rows) else -1
+        if self.sel >= 0:
+            self.cur = self.rows[self.sel]  # cur follows the selected row
+            n = self.nodes[self.cur]
+            # the gutter and the name double as the disclosure; the columns only
+            # select, so a folder can still be marked without opening it
+            if self.list_mode is None and e.x < X_SIZE and n[EXPAND]:
+                n[OPEN] = not n[OPEN]
+                self.refresh()
+                return
         self.redraw()
 
     # ---- view ------------------------------------------------------------
 
     def refresh(self):
+        flat = True
         if self.list_mode == "top":
             self.rows = self.top_files()
         elif self.list_mode == "search":
             self.rows = self.search_rows()
         else:
-            self.rows = children(self.nodes, self.cur) if self.nodes else []
-        self.rows.sort(key=self.sort_key())
-        self.sel = 0 if self.rows else -1
+            # tree rows come back already ordered: sorted per level, kids below
+            self.rows, flat = self.build_rows(), False
+        if flat:
+            self.rows.sort(key=self.sort_key())
+        # the picked row stays picked where it still fits, so drilling in place
+        # does not drop the selection
+        self.sel = min(max(0, self.sel), len(self.rows) - 1) if self.rows else -1
         self.off = 0
         self.redraw()
+
+    def build_rows(self):
+        """Depth-first over the tree: a folder's kids sit under it once OPEN.
+
+        EXPAND says the folder is browsable at all (bundles and files are not),
+        OPEN is this user's toggle, and show_files off hides file/link leaves.
+        """
+        n, key = self.nodes, self.sort_key()
+        keep = self.cfg.get("show_files", True)
+        rows, stack = [], [0] if self.nodes else []
+        while stack:
+            i = stack.pop()
+            if i:
+                rows.append(i)  # the folder scanned is in the band, not a row
+            ni = n[i]
+            if not (ni[OPEN] and ni[EXPAND]):
+                continue
+            kids = [k for k in sorted(children(n, i), key=key)
+                    if keep or n[k][KIND] in (K_DIR, K_VOL)]
+            for k in reversed(kids):
+                stack.append(k)  # reversed so the stack pops them biggest-first
+        return rows
 
     def sort_key(self):
         n, head = self.nodes, head_of(self.cfg)
@@ -435,6 +488,20 @@ class App:
         self.refresh()
 
     def up(self):
+        # in the tree view the rows never move, so up moves the selection to the
+        # row above: the folder that holds this one
+        if self.list_mode is None and self.rows and self.sel >= 0:
+            par = self.nodes[self.rows[self.sel]][PARENT]
+            if par:
+                self.cur = par
+                self.sel = self.rows.index(par) if par in self.rows else -1
+                self.redraw()
+            elif self.cur:
+                self.cur, self.sel = 0, -1
+                self.redraw()
+            else:
+                self.flash("already at the folder you scanned")
+            return
         if self.cur:
             self.cur = self.nodes[self.cur][PARENT]
             self.list_mode = None
@@ -455,12 +522,81 @@ class App:
             self.flash("bundle: its bytes are counted, but it is not browsable")
             return
         self.cur = i
-        self.list_mode = None
+        if self.list_mode is None:
+            # the tree stays put: drilling opens or closes that row in place
+            n[OPEN] = not n[OPEN]
+        else:
+            self.list_mode = None
         self.refresh()
 
     def flash(self, msg):
         self.note = msg
         self.redraw()
+
+    # ---- right-click popup ------------------------------------------------
+
+    def menu(self, e):
+        """Plain Labels in a Toplevel beside the cursor: one line per action."""
+        self.close_menu()  # one popup at a time
+        i = (e.y - TOP) // ROW_H + self.off
+        self.sel = i if 0 <= i < len(self.rows) else -1
+        if self.sel >= 0:
+            self.cur = self.rows[self.sel]
+        self.mvar = tkinter.StringVar()
+        self.mvar.set(self.nodes[self.rows[self.sel]][NAME] if self.sel >= 0
+                      else short(self.root_path))
+        sw, sh = self.tk.winfo_screenwidth(), self.tk.winfo_screenheight()
+        px = max(0, min(self.canvas.winfo_x() + e.x + 12, sw - MENU_W - 8))
+        py = max(0, min(self.canvas.winfo_y() + e.y - 10, sh - MENU_H - 8))
+        top = tkinter.Toplevel(self.tk)
+        top.configure(bg=BG)
+        top.geometry("%dx%d+%d+%d" % (MENU_W, MENU_H, px, py))
+        tkinter.Label(top, textvariable=self.mvar, bg=BG, fg=ACCENT, font=FONT,
+                      anchor="w").pack(anchor="w", padx=10, pady=(6, 4))
+        for label, act in MENU_ITEMS:
+            w = tkinter.Label(top, text=label, bg=BG, fg=FG, font=FONT_SMALL,
+                              cursor="hand2")
+            w.pack(anchor="w", padx=10, pady=1)
+            w.bind("<Button-1>", lambda ev, a=act: self.menu_act(a))
+        tkinter.Label(top, text="click an item  ·  Esc closes", bg=BG,
+                      fg=FAINT, font=FONT_SMALL).pack(anchor="w", padx=10,
+                                                      pady=(4, 6))
+        # a click on the popup's own background closes it, and so does Esc
+        top.bind("<Button-1>", lambda ev: self.close_menu())
+        top.bind("<Escape>", lambda ev: self.close_menu())
+        top.focus_force()
+        self.menupop = top
+
+    def menu_act(self, a):
+        """A click on one line: drop the popup, then run that action."""
+        if a == "props":
+            self.props()  # the popup stays open so the text can be read
+            return
+        self.close_menu()
+        if a != "close":
+            self.act(a)
+
+    def close_menu(self):
+        if self.menupop:
+            self.menupop.destroy()
+            self.menupop = None
+        self.mvar = None
+
+    def props(self):
+        """Row facts folded into the popup header instead of a second window."""
+        if not self.mvar or not self.menupop or not self.rows or self.sel < 0:
+            return
+        i = self.rows[self.sel]
+        n = self.nodes[i]
+        head = head_of(self.cfg)
+        par = self.nodes[n[PARENT]] if n[PARENT] >= 0 else n
+        pct = n[head] * 100.0 / par[head] if par[head] else 0.0
+        kind = {K_DIR: "folder", K_FILE: "file", K_LINK: "link",
+                K_VOL: "volume"}[n[KIND]]
+        path = short(node_path(self.nodes, i))
+        self.mvar.set(f"{n[NAME]}  {kind}  {human(n[SUBLOG])} logical  "
+                      f"{human(n[SUBALLOC])} on disk  {pct:.1f}% of parent  "
+                      f"{n[NFILES]:,} files\n{path}")
 
     def draw_row(self, c, slot, ni, selected):
         n, head = self.nodes, head_of(self.cfg)
@@ -470,6 +606,9 @@ class App:
             c.create_rectangle(2, y, W - 4, y + ROW_H - 2, fill=ROW_ALT)
         if selected:
             c.create_rectangle(2, y, W - 4, y + ROW_H - 2, fill=SEL)
+        # rows step right by IND per tree level, capped so deep names still fit
+        d = max(0, min(6, n[DEPTH] - 1))
+        gx, nx = X_GUT + d * IND, X_NAME + d * IND
         name = n[NAME]
         if n[KIND] == K_LINK:
             name += "  @ link"
@@ -484,7 +623,12 @@ class App:
         fg = FILE_FILL if n[KIND] in (K_FILE, K_LINK) else DIR_FILL
         if n[KIND] == K_VOL or n[MARK]:
             fg = ACCENT
-        c.create_text(X_NAME, y + 2, anchor="nw", text=name, fill=fg, font=FONT)
+        # only a browsable folder gets a disclosure: ▸ closed, ▾ showing its kids
+        if n[EXPAND]:
+            c.create_text(gx, y + 2, anchor="nw", font=FONT,
+                          text="▾" if n[OPEN] else "▸",
+                          fill=ACCENT if n[OPEN] else FAINT)
+        c.create_text(nx, y + 2, anchor="nw", text=name, fill=fg, font=FONT)
         c.create_text(X_SIZE, y + ROW_H - 3, anchor="se", text=human(n[SUBLOG]),
                       fill=FG, font=FONT)
         c.create_text(X_ONDISK, y + ROW_H - 3, anchor="se",
@@ -741,13 +885,13 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 def load_cfg():
     cfg = {"excludes": list(DEFAULT_EXCLUDES), "size": "logical",
-           "top_n": 20, "trash": ""}
+           "top_n": 20, "trash": "", "show_files": True}
     path = os.path.join(SCRIPT_DIR, "config.json")
     try:
         with open(path) as fh:
             data = json.load(fh)
         if isinstance(data, dict):
-            for k in ("excludes", "size", "top_n", "trash"):
+            for k in ("excludes", "size", "top_n", "trash", "show_files"):
                 if k in data:
                     cfg[k] = data[k]
     except FileNotFoundError:
