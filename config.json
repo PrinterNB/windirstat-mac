@@ -1,0 +1,12 @@
+{
+  "excludes": [
+    "/dev",
+    "/private",
+    "/proc",
+    "/System",
+    "/Volumes"
+  ],
+  "size": "logical",
+  "top_n": 20,
+  "trash": ""
+}
